@@ -1,0 +1,677 @@
+# 20210812
+
+# Maryland & DC Breeding Bird Atlas 3 data validation process
+
+# The validation process checks data submitted to the MD-DC BBA3 eBird portal
+# to find unexpected observations. It uses breeding code, location, and date to
+# evaluate each observation. After evaluation, an observation's breeding code 
+# is defined as Expected, Plausible, or Improbable and the observation is 
+# defined as Confident, Uncertain, or Unlikely based on date and location. 
+# Some of these can be automatically edited; others require manual review.
+
+library(here)
+library(tidyverse)
+library(lubridate)
+
+# month and year should be the most recent ebird data download
+month <- "jul"
+year <- 2021
+
+# Read in all data submitted to the Atlas portal
+# (these data were standardized using 03_bba_dataprep.R)
+bba3 <- read.delim(here("data", "ebird", "2_standardized",
+                        paste0("mddcbba3_", month, year,
+                               "_standardized.txt")), quote = "")
+
+# remove observations without breeding codes because we can assume that all
+# identifications are correct thanks to eBird reviewers.
+bba3 <- filter(bba3, breeding_category %in% c("C2", "C3", "C4"))
+
+# Read in the charts to check the data against
+codes <- read.csv(here("data", "bba3", 
+                       "expected_breeding_codes_mar2021.csv"))
+
+dates <- read.csv(here("data", "bba3", "expected_dates.csv"))
+
+loc <- read.csv(here("output", "validation", 
+                     "ebird_flags_adjusted_cwb_nov2020.csv"))
+
+cat2_changes <- read.csv(here("data", "bba3", 
+                              "expected_breeding_code_cat2_changes.csv"))
+
+cat3_changes <- read.csv(here("data", "bba3", 
+                              "expected_breeding_code_cat3_changes.csv"))
+
+# MD-DC breeding species
+breeding_sp <- unique(dates$common_name)
+
+# MD-DC colonial waterbirds
+cwb <- unlist(read.csv(here("data", "bba3",
+                            "colonial_waterbirds_jul2021.csv")))
+
+# add the species with codes that are not in codes/dates/locations
+# to codes/dates/locations.
+# fill column values with NA
+codes <- full_join(data.frame(common_name = unique(bba3[, "common_name"])), 
+                   codes, by = "common_name")
+
+dates <- full_join(data.frame(common_name = unique(bba3[, "common_name"])), 
+                   dates, by = "common_name")
+
+loc <- full_join(data.frame(common_name = unique(bba3[, "common_name"])),
+                 loc, by = "common_name")
+
+cat2_changes <- full_join(data.frame(common_name = 
+                                       unique(bba3[, "common_name"])),
+                          cat2_changes, by = "common_name")
+
+cat3_changes <- full_join(data.frame(common_name = 
+                                       unique(bba3[, "common_name"])),
+                          cat3_changes, by = "common_name")
+
+# Check data structure assumptions --------------------------------------------
+str(bba3)
+summary(bba3)
+
+# check each column for NAs
+check <- sapply(bba3, function(x) any(is.na(x)))
+names(check[which(check == TRUE)])
+
+unique(bba3$protocol_type)
+
+month_num <- grep(paste0("(?i)", month), month.abb) + 1
+
+if(any(c(unique(bba3$project_code) != "EBIRD_ATL_MD_DC",
+         any(!unique(bba3$breeding_code) %in% colnames(select(codes, H:NY))),
+         any(!unique(bba3$state) %in% c("Maryland", "District of Columbia")),
+         min(as_date(bba3$observation_date)) < as_date("2020-01-01"),
+         max(as_date(bba3$observation_date)) > as_date(
+           paste(year, month_num, 01, sep = "-")
+           ))))
+  warning("Data are in unexpected format")
+
+rm(check, month_num)
+
+# Checklist-level DQ Steps ----------------------------------------------------
+## Block boundary review -- currently not possible
+
+# Observation-level DQ Steps --------------------------------------------------
+## Broad overview:
+### Add column with expected code category (Expected, Plausible, Improbable)
+### Add column with spatiotemporal tier (Confident, Uncertain, Unlikely)
+### Auto/manual review based on category and tier
+
+# a) Code-species mismatch review ---------------------------------------------
+# Classify records using Expected Codes Chart 
+## expected (1), no review needed
+## plausible (2), review needed
+## improbable (3), no review needed
+## NA indicates a non-breeding species
+
+# match species names and breeding codes to get the review category
+bba3$dv_code <- vapply(seq_len(nrow(bba3)), function(i) {
+  codes[which(codes[, "common_name"] == bba3[i, "common_name"]), 
+        bba3[i, "breeding_code"]]
+}, NA_integer_)
+
+# rename the category with more straightforward labels
+bba3$dv_code <- case_when(
+  bba3$dv_code == 1 ~ "expected",
+  bba3$dv_code == 2 ~ "plausible",
+  bba3$dv_code == 3 ~ "improbable",
+  TRUE ~ NA_character_
+  )
+
+# check that species were evaluated as expected
+if (any(unique(bba3[which(is.na(bba3$dv_code)), "common_name"]) 
+        %in% breeding_sp))
+  warning("Some breeding species have not been evaluated")
+
+table(bba3$dv_code)
+
+# Address records based on category
+## expected --> no action
+## plausible --> further evaluation
+## improbable --> change using decision rules in expected codes chart
+
+# change cat3 (improbable) codes using cat3_change chart
+cat3_changes[, 1:length(cat3_changes)] <- lapply(cat3_changes, as.character)
+
+bba3$new_code <- case_when(
+  bba3$dv_code == "improbable" ~ vapply(seq_len(nrow(bba3)), function(i) {
+    cat3_changes[which(cat3_changes[, "common_name"] == 
+                         bba3[i, "common_name"]),
+                 bba3[i, "breeding_code"]]
+  }, NA_character_),
+  
+  TRUE ~ "no_change"
+)
+
+# separate the newly imported breeding code and reason and update review cat
+bba3 <- bba3 %>%
+  mutate(new_code_reason = str_extract(new_code, "(?<=_).+[^no_change]"),
+         new_code = ifelse(new_code == "no_change", 
+                           breeding_code, 
+                           str_extract(new_code, ".+(?=_)")))
+
+# check that these changes went as expected
+summary(bba3[, c("new_code", "new_code_reason")])
+lapply(bba3[, c("new_code", "new_code_reason")], table)
+table(bba3[, c("breeding_code", "new_code_reason")])
+
+if (any(c(sum(bba3$new_code != bba3$breeding_code) != 
+    sum(bba3$dv_code == "improbable", na.rm = TRUE)),
+    any(!unique(bba3$breeding_code) %in% colnames(select(codes, H:NY)))))
+  warning("Data validation did not go as expected")
+
+bba3 <- bba3 %>%
+  mutate(dv_code = ifelse(dv_code == "improbable", "expected", dv_code))
+
+# b) Spatiotemporal review ----------------------------------------------------
+# use new_code column for subsequent checks
+# flag records at the county level using the location
+
+# separate loc dataset into colony and non-colony locations so each can be
+# evaluated separately.
+loc_county <- unique(loc[, c("common_name", "county", "expected")])
+
+loc_colony <- unique(loc[, c("common_name", "block_name", "colony")])
+
+bba3 <- bba3 %>% 
+  left_join(., loc_county, by = c("common_name", "county")) %>%
+  left_join(., loc_colony, by = c("common_name", "block_name")) %>% 
+  rename(dv_loc_county = expected,
+         dv_loc_colony = colony)
+
+bba3[which(bba3[, "common_name"] %in% cwb & 
+             is.na(bba3[, "dv_loc_colony"])), "dv_loc_colony"] <- "no_colony"
+
+bba3[which(is.na(bba3$dv_loc_county)), "dv_loc_county"] <- "unexpected"
+
+seq_na <- function(x, y) {
+  if(is.na(x) | is.na(y)) NA else seq(x, y)
+}
+
+# convert breeding/safe dates to julian date
+# set date periods so that there are no gaps or overlaps between periods
+dates <- dates %>%
+  mutate(
+    breeding_start = yday(B_safe_start_date),
+    
+    breeding_end = ifelse(yday(B_safe_end_date) == 365, 366,
+                          yday(B_safe_end_date)),
+    
+    prebreeding_start = ifelse(yday(E_recorded_breeding_start_date) >=
+                                 breeding_start, NA,
+                               yday(E_recorded_breeding_start_date)),
+    
+    prebreeding_end = ifelse(is.na(prebreeding_start), NA,
+                             (breeding_start - 1)),
+    
+    earlyseason_start = ifelse(is.na(prebreeding_start) &
+                                 breeding_start != 1, 1, 
+                               ifelse(breeding_start == 1 | 
+                                        prebreeding_start == 1, NA, 1)),
+    
+    earlyseason_end = ifelse(is.na(earlyseason_start), NA,
+                             ifelse(is.na(prebreeding_start),
+                                    (breeding_start - 1),
+                                    (prebreeding_start - 1))),
+    
+    postbreeding_end = ifelse(yday(E_recorded_breeding_end_date) <= 
+                                breeding_end, NA,
+                              ifelse(yday(E_recorded_breeding_end_date) == 365,
+                                     366, yday(E_recorded_breeding_end_date))),
+    
+    postbreeding_start = ifelse(is.na(postbreeding_end), NA,
+                                (breeding_end + 1)),
+    
+    lateseason_end = ifelse(is.na(postbreeding_end) &
+                              breeding_end != 366, 366,
+                            ifelse(postbreeding_end == 366 |
+                                     breeding_end == 366, NA, 366)),
+    
+    lateseason_start = ifelse(is.na(lateseason_end), NA, 
+                              ifelse(is.na(postbreeding_end),
+                                     (breeding_end + 1),
+                                     (postbreeding_end + 1)))
+  ) %>%
+  select(1:last_col(10), 
+         earlyseason_start,
+         earlyseason_end,
+         prebreeding_start,
+         prebreeding_end,
+         breeding_start,
+         breeding_end,
+         postbreeding_start,
+         postbreeding_end,
+         lateseason_start,
+         lateseason_end)
+
+# create an interval of 1:366 for each species using the season start and end
+# dates to inform how long each season is within that interval. If a season
+# is missing, it is NA.
+# define seasons
+## EARLYSEASON == Jan 1 to prebreeding_start
+## PREBREEDING == prebreeding_start to breeding_start
+## BREEDING == _breeding_start to core_breeding_end
+## POSTBREEDING == breeding_end to postbreeding_end
+## LATESEASON == postbreeding_end to Dec 31
+
+# GHOW safe dates begin Dec 15, so they don't fit with the rest (ie breeding 
+# range is c(349:366, 1:227) and start date is > end date). Because of this, 
+# it will only have a late season (228:348). Set earlyseason/prebreeding 
+# seasons to NA.
+
+dates$season_len <- lapply(1:nrow(dates), function(x) {
+  list(
+    earlyseason = ifelse(dates$breeding_start[x] < dates$breeding_end[x],
+                         map2(dates$earlyseason_start[x],
+                              dates$earlyseason_end[x], seq_na), list(NA)),
+    
+    prebreeding = ifelse(dates$breeding_start[x] < dates$breeding_end[x],
+                         map2(dates$prebreeding_start[x],
+                              dates$prebreeding_end[x], seq_na), list(NA)),
+    
+    breeding = ifelse(dates$breeding_start[x] < dates$breeding_end[x],
+                      map2(dates$breeding_start[x],
+                           dates$breeding_end[x], seq_na),
+                      list(c(seq(from = 1, to = dates$breeding_end[x]),
+                             seq(from = dates$breeding_start[x], to = 366)))),
+    
+    postbreeding = ifelse(dates$breeding_start[x] < dates$breeding_end[x],
+                          map2(dates$postbreeding_start[x],
+                               dates$postbreeding_end[x], seq_na),
+                          ifelse(is.na(dates$postbreeding_end[x]),
+                                 list(NA),
+                                 list(seq(
+                                   from = dates$postbreeding_start[x],
+                                   to = min(c(
+                                     (dates$breeding_start[x] - 1),
+                                     (dates$lateseason_start[x] - 1))
+                                     ))))),
+    
+    lateseason = ifelse(dates$breeding_start[x] < dates$breeding_end[x],
+                        map2(dates$lateseason_start[x],
+                             dates$lateseason_end[x], seq_na),
+                        ifelse(is.na(dates$postbreeding_end[x]),
+                               list(seq(from = (dates$breeding_end[x] + 1), 
+                                        to = (dates$breeding_start[x] - 1))),
+                               list(seq(from = (dates$postbreeding_end[x] + 1),
+                                        to = (dates$breeding_end[x] - 1)))))
+  )
+})
+
+# provide the species name as the list name
+names(dates$season_len) <- dates$common_name
+
+# check that the new dates column look as expected
+if(any(names(which(lapply(dates$season_len, every, is.na) == TRUE)) 
+    %in% breeding_sp))
+  warning("Julian dates were not created as expected")
+
+# every species should have each julian date represented exactly once
+if (any(c(any(map(map(dates$season_len, discard, is.na), transpose) %>%
+        flatten() %>%
+        map(., reduce, sum) %>%
+        map(., sum) %>%
+        unlist() != sum(1:366)),
+    any(names(which(lapply(dates$season_len, every, is.na) == TRUE)) 
+        %in% breeding_sp))))
+  warning("Julian dates were not created as expected")
+
+bba3 <- left_join(bba3, dates[, c("common_name", "season_len")],
+                  by = "common_name")
+
+# assign the season the observation was recorded in
+bba3$observation_season <- sapply(1:nrow(bba3), function(x) {
+  if (bba3$jdate[x] %in% bba3$season_len[[x]]$earlyseason[[1]]) {
+    "earlyseason"
+  } else if (bba3$jdate[x] %in% bba3$season_len[[x]]$prebreeding[[1]]) {
+    "prebreeding"
+  } else if (bba3$jdate[x] %in% bba3$season_len[[x]]$breeding[[1]]) {
+    "breeding"
+  } else if (bba3$jdate[x] %in% bba3$season_len[[x]]$postbreeding[[1]]) {
+    "postbreeding"
+  } else if (bba3$jdate[x] %in% bba3$season_len[[x]]$lateseason[[1]]) {
+    "lateseason"
+  } else {
+    NA_character_
+  }
+})
+
+# check that species were evaluated as expected
+table(bba3$observation_season)
+
+if (any(unique(bba3[which(is.na(bba3$observation_season)), "common_name"]) 
+        %in% breeding_sp))
+  warning("Seasons have not been evaluated as expected")
+
+# classify records into three tiers (Confident, Uncertain, Unlikely)
+bba3 <- bba3 %>% 
+  mutate(eval_tier = case_when(
+    observation_season %in% c("earlyseason", "lateseason") &
+      (dv_loc_county == "expected" |
+         dv_loc_colony == "colony") &
+      breeding_category == "C4" ~ "confident",
+    
+    observation_season == "earlyseason" &
+      dv_loc_county == "expected" &
+      common_name %in% c("Turkey Vulture", "Black Vulture") &
+      breeding_code == "P" ~ "confident",
+    
+    observation_season %in% c("earlyseason", "lateseason") &
+      (dv_loc_county == "unexpected" |
+         dv_loc_colony == "no_colony") &
+      breeding_category == "C4" ~ "uncertain",
+    
+    observation_season %in% c("earlyseason", "lateseason") &
+      breeding_category %in% c("C2", "C3") ~ "unlikely",
+    
+    observation_season %in% c("prebreeding", "postbreeding") &
+      (dv_loc_county == "expected" |
+         dv_loc_colony == "colony") &
+      breeding_category %in% c("C3", "C4") ~ "confident",
+    
+    observation_season %in% c("prebreeding", "postbreeding") &
+      (dv_loc_county == "unexpected" |
+         dv_loc_colony == "no_colony") &
+      breeding_category %in% c("C3", "C4") ~ "uncertain",
+    
+    observation_season %in% c("prebreeding", "postbreeding") &
+      breeding_category == "C2" ~ "unlikely",
+    
+    observation_season == "breeding" &
+      (dv_loc_county == "expected" |
+         dv_loc_colony == "colony") ~ "confident",
+    
+    observation_season == "breeding" &
+      (dv_loc_county == "unexpected" |
+         dv_loc_colony == "no_colony") &
+      (breeding_category %in% c("C2", "C4") |
+      breeding_code == "S7") &
+      breeding_code != "FL" ~ "confident",
+    
+    observation_season == "breeding" &
+      (dv_loc_county == "unexpected" |
+         dv_loc_colony == "no_colony") &
+      (breeding_category == "C3" |
+         breeding_code == "FL") &
+      breeding_code != "S7" ~ "uncertain",
+    
+    TRUE ~ NA_character_
+  )) 
+
+# check that the eval_tier column looks as expected
+table(bba3$eval_tier)
+
+if(any(unique(bba3[which(is.na(bba3$eval_tier)), "common_name"]) %in% 
+      breeding_sp))
+  warning("Review tier evaluation has not gone as expected")
+
+# Add column with highest breeding code in that block for that species and
+# column showing how many times that breeding code occurs in the block for that
+# species.
+bba3$new_code <- factor(bba3$new_code, 
+                        ordered = TRUE,
+                        levels = colnames(select(codes, H:NY)))
+
+bba3 <- bba3 %>%
+  group_by(year(as_date(observation_date)), common_name, block_name) %>%
+  mutate(highest_block_breeding_code = 
+           # this will kick up warnings for missing values
+           suppressWarnings(
+             max(new_code[eval_tier == "confident" & dv_code == "expected"])
+             ),
+         n_highest_block_breeding_code = 
+           length(which(new_code %in% max(new_code)))) %>%
+  mutate(highest_block_breeding_code = case_when(
+    is.na(highest_block_breeding_code) ~ max(highest_block_breeding_code),
+    
+    TRUE ~ highest_block_breeding_code
+  )) %>%
+  ungroup()
+
+table(bba3$highest_block_breeding_code)
+sum(is.na(bba3$highest_block_breeding_code))
+
+# in blocks that have at least one confident confirmation for a species, retain
+# C3 codes from breeding season, C4 codes from pre/postbreeding season. 
+bba3 <- bba3 %>%
+  mutate(eval_tier = case_when(
+    breeding_category == "C3" &
+      observation_season == "breeding" &
+      eval_tier == "uncertain" &
+      highest_block_breeding_code > "PE" ~ "confident",
+    
+    breeding_category == "C4" &
+      observation_season %in% c("prebreeding", "postbreeding") &
+      eval_tier == "uncertain" & 
+      highest_block_breeding_code > "PE" ~ "confident",
+    
+    TRUE ~ eval_tier
+  ))
+
+# check for new colonies (ie confirmations in blocks with no known colony)
+# and create a new column indicating when the first confirmation for that 
+# colony was found.
+bba3 <- bba3 %>%
+  group_by(block_name) %>%
+  mutate(new_colony = case_when(
+    dv_loc_colony == "no_colony" &
+      common_name %in% cwb &
+      breeding_category == "C4" &
+      eval_tier == "confident" ~ as_date(observation_date),
+    
+    TRUE ~ NA_Date_
+  ),
+  dv_loc_colony = case_when(
+    !is.na(new_colony) ~ "colony",
+    
+    TRUE ~ dv_loc_colony
+  )) %>%
+  group_by(common_name, block_name) %>%
+  mutate(new_colony = case_when(
+    !is.na(new_colony) ~ min(new_colony),
+    
+    TRUE ~ new_colony
+    )) %>%
+  ungroup()
+
+length(which(!is.na(bba3$new_colony)))
+unique(bba3$block_name[!is.na(bba3$new_colony)])
+
+if(nrow(bba3[which(is.na(bba3$block_name) & !is.na(bba3$new_colony)), ]) > 0)
+  c(message("Check the links below to make sure they are valid:"),
+  bba3[which(is.na(bba3$block_name) & !is.na(bba3$new_colony)), "link"])
+
+# pull out unique new colony records and save in a file
+colony <- bba3 %>%
+  distinct(common_name, block_name, .keep_all = TRUE) %>%
+  filter(!is.na(new_colony)) %>%
+  select(taxonomic_order,
+         common_name,
+         observation_date,
+         new_colony,
+         observation_count,
+         breeding_code,
+         county,
+         block_name,
+         locality,
+         latitude,
+         longitude,
+         species_comments,
+         link)
+
+write.csv(colony, here("data", "ebird", "3_filtered",
+                       paste0("colonies_", month, year, ".csv")),
+          row.names = FALSE)
+
+# update eval_tier records based on new known colonies
+bba3 <- bba3 %>% 
+  mutate(eval_tier = case_when(
+    dv_loc_colony == "colony" &
+      observation_season %in% c("earlyseason", "lateseason") &
+      breeding_category == "C4" ~ "confident",
+    
+    dv_loc_colony == "colony" &
+      observation_season == "breeding" &
+      eval_tier != "confident" ~ "confident",
+    
+    dv_loc_colony == "colony" &
+      observation_season %in% c("prebreeding", "postbreeding") &
+      breeding_category %in% c("C3", "C4") &
+      eval_tier != "confident" ~ "confident",
+    
+    TRUE ~ eval_tier
+  ))
+
+# address records based on review tier
+## confident: no action needed
+## uncertain: further evaluation
+## unlikely: change breeding code to no_code
+bba3$new_code <- as.character(bba3$new_code)
+
+bba3 <- bba3 %>%
+  mutate(behavior_code = case_when(
+    eval_tier == "unlikely" ~ breeding_code,
+    TRUE ~ behavior_code
+  ),
+  new_code = case_when(
+    eval_tier == "unlikely" ~ "NC",
+    TRUE ~ new_code
+  ),
+  new_code_reason = case_when(
+    eval_tier == "unlikely" &
+      (dv_loc_county == "expected" | dv_loc_colony == "colony") &
+      observation_season %in% c("earlyseason", "prebreeding") ~ "tooearly",
+    
+    eval_tier == "unlikely" &
+      (dv_loc_county == "expected" | dv_loc_colony == "colony") &
+      observation_season %in% c("postbreeding", "lateseason") ~ "toolate",
+    
+    eval_tier == "unlikely" &
+      (dv_loc_county == "unexpected" | 
+         dv_loc_colony == "no_colony") ~ "notlikely",
+    
+    TRUE ~ new_code_reason
+  ),
+  
+  eval_tier = case_when(
+    new_code == "NC" & eval_tier == "unlikely" ~ "confident",
+    
+    TRUE ~ eval_tier
+  ))
+
+# Review tagged records -------------------------------------------------------
+# get records for manual review that are cat2 and tier2, that haven't been 
+# changed, and that have additional info (ie comments or media).
+manual_review <- bba3 %>%
+  filter((dv_code == "plausible" | eval_tier == "uncertain") &
+           is.na(new_code_reason) &
+           (!is.na(trip_comments) | 
+              !is.na(species_comments) |
+              has_media == TRUE)) %>%
+  select(global_unique_identifier,
+         protocol_type,
+         atlaser_name,
+         taxonomic_order,
+         common_name,
+         breeding_code,
+         breeding_category,
+         behavior_code,
+         orig_species_code,
+         highest_block_breeding_code,
+         n_highest_block_breeding_code,
+         new_code,
+         new_code_reason,
+         eval_tier,
+         dv_code,
+         dv_loc_county,
+         dv_loc_colony,
+         new_colony,
+         county,
+         block_name,
+         locality,
+         datetime,
+         observation_season,
+         duration_minutes,
+         effort_distance_km,
+         all_species_reported,
+         has_media,
+         species_comments,
+         trip_comments,
+         link)
+
+write.csv(manual_review, here("data", "ebird", "4_review", 
+                              paste0("mddcbba3_manualreview_", 
+                                     month, year, ".csv")),
+          row.names = FALSE)
+
+# records that don't have additional info get changed based on decision rules
+# in expected codes chart.
+cat2_changes[, 1:length(cat2_changes)] <- lapply(cat2_changes, as.character)
+
+bba3 <- bba3 %>%
+  mutate(new_code = case_when(
+    dv_code == "plausible" &
+      is.na(new_code_reason) &
+      (is.na(trip_comments) &
+         is.na(species_comments) &
+         has_media == FALSE) ~ vapply(seq_len(nrow(bba3)), function(i) {
+           cat2_changes[which(cat2_changes[, "common_name"] == 
+                                as.character(bba3[i, "common_name"])),
+                        as.character(bba3[i, "breeding_code"])]
+           }, NA_character_),
+    
+    eval_tier == "uncertain" &
+      is.na(new_code_reason) &
+      (is.na(trip_comments) &
+         is.na(species_comments) &
+         has_media == FALSE) ~ "NC",
+    
+    TRUE ~ new_code
+  ), 
+  
+  dv_code = case_when(
+    dv_code == "plausible" &
+      is.na(new_code_reason) &
+      (is.na(trip_comments) &
+         is.na(species_comments) &
+         has_media == FALSE) ~ "expected",
+    
+    TRUE ~ dv_code
+  ),
+  
+  eval_tier = case_when(
+    eval_tier == "uncertain" &
+      is.na(new_code_reason) &
+      (is.na(trip_comments) &
+         is.na(species_comments) &
+         has_media == FALSE) ~ "confident",
+    
+    TRUE ~ eval_tier
+  ),
+  
+  new_code_reason = case_when(
+    is.na(new_code_reason) &
+      str_detect(new_code, "_") ~ str_extract(new_code, 
+                                              "(?<=_).+[^no_change]"),
+    
+    is.na(new_code_reason) & new_code == "NC" ~ "bcinadqt",
+    
+    TRUE ~ new_code_reason
+  ),
+  
+  new_code = ifelse(str_detect(new_code, "_"), 
+                    str_extract(new_code, ".+(?=_)"),
+                    new_code),
+  
+  last_reviewed_date = Sys.time()) %>%
+  select(-c(season_len,
+            `year(as_date(observation_date))`))
+
+write.csv(bba3, here("data", "ebird", "5_validated",
+                     paste0("mddcbba3_autovalidated_", month, year, ".csv")),
+          row.names = FALSE)
+          
