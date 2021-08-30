@@ -1,0 +1,35 @@
+# 20210827
+
+# After data have been reviewed using 08_data_validation.R and the manual 
+# review of that output has been completed, join the auto-reviewed and the 
+# manually reviewed datasets together.
+
+# bring in the new_code, the new_code_reason, the behavior_code
+# change eval_tier and dv_code
+
+library(here)
+library(tidyverse)
+
+month <- "jul"
+year <- 2021
+id <- "global_unique_identifier"
+
+bba3 <- read.csv(here("data", "ebird", "5_validated",
+                           paste0("mddcbba3_autovalidated_", 
+                                  month, year, ".csv")))
+  
+bba3_man <- read.csv(here("data", "ebird", "4_review", 
+                          paste0("mddcbba3_manualreview_", 
+                                 month, year, ".csv")))
+
+for(x in c("new_code", "new_code_reason", "behavior_code")) {
+  bba3[, x] <- replace(bba3[, x],
+                       which(bba3[, id] %in% bba3_man[, id]),
+                       bba3_man[, x])
+  }
+
+bba3[which(bba3[, id] %in% bba3_man[, id]), "last_reviewed_date"] <- Sys.time()
+
+write.csv(bba3, here("data", "ebird", "5_validated",
+                     paste0("mddcbba3_validated_", month, year, ".csv")),
+          row.names = FALSE)
