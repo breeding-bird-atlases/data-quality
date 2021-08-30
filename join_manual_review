@@ -38,7 +38,26 @@ for(x in c("new_code", "new_code_reason", "behavior_code")) {
   bba3[, x] <- replace(bba3[, x],
                        which(bba3[, id] %in% bba3_man[, id]),
                        bba3_man[, x])
-  }
+}
+
+# update the breeding category to match the breeding code
+update_brdcat <- function(x) {
+  case_when(x$new_code %in% "NC" ~ "C1",
+            x$new_code %in% c("H", "S") ~ "C2",
+            
+            x$new_code %in% c("S7", "M", "P", "T", "C", "N", "A", "B", 
+                              "PE") ~ "C3",
+            
+            x$new_code %in% c("CN", "NB", "DD", "UN", "ON", "FL", 
+                              "CF", "FY", "FS", "NE", "NY") ~ "C4",
+            
+            TRUE ~ NA_character_)
+}
+
+bba3$breeding_category <- update_brdcat(bba3)
+
+if (any(is.na(bba3$breeding_category)))
+  warning("NAs in breeding category, so check that breeding codes are right")
 
 bba3[which(bba3[, id] %in% bba3_man[, id]), "last_reviewed_date"] <- Sys.time()
 
