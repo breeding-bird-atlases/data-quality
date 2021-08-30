@@ -22,6 +22,18 @@ bba3_man <- read.csv(here("data", "ebird", "4_review",
                           paste0("mddcbba3_manualreview_", 
                                  month, year, ".csv")))
 
+bba3_man <- bba3_man %>%
+  mutate(behavior_code = case_when(
+    new_code_reason %in% c("bcawaysite",
+                           "cfnotapp",
+                           "nbnotapp",
+                           "notlikely",
+                           "notlocal",
+                           "tooearly",
+                           "toolate") ~ breeding_code,
+    TRUE ~ new_code
+  ))
+
 for(x in c("new_code", "new_code_reason", "behavior_code")) {
   bba3[, x] <- replace(bba3[, x],
                        which(bba3[, id] %in% bba3_man[, id]),
