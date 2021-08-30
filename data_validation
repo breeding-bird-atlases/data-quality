@@ -167,6 +167,25 @@ if (any(c(sum(bba3$new_code != bba3$breeding_code) !=
 bba3 <- bba3 %>%
   mutate(dv_code = ifelse(dv_code == "improbable", "expected", dv_code))
 
+# update the breeding category to match the breeding code
+update_brdcat <- function(x) {
+  case_when(x$new_code %in% "NC" ~ "C1",
+            x$new_code %in% c("H", "S") ~ "C2",
+            
+            x$new_code %in% c("S7", "M", "P", "T", "C", "N", "A", "B", 
+                              "PE") ~ "C3",
+            
+            x$new_code %in% c("CN", "NB", "DD", "UN", "ON", "FL", 
+                              "CF", "FY", "FS", "NE", "NY") ~ "C4",
+            
+            TRUE ~ NA_character_)
+}
+
+bba3$breeding_category <- update_brdcat(bba3)
+
+if (any(is.na(bba3$breeding_category)))
+  warning("NAs in breeding category, so check that breeding codes are right")
+
 # b) Spatiotemporal review ----------------------------------------------------
 # use new_code column for subsequent checks
 # flag records at the county level using the location
@@ -435,6 +454,12 @@ bba3 <- bba3 %>%
 table(bba3$highest_block_breeding_code)
 sum(is.na(bba3$highest_block_breeding_code))
 
+# update breeding category based on code changes
+bba3$breeding_category <- update_brdcat(bba3)
+
+if (any(is.na(bba3$breeding_category)))
+  warning("NAs in breeding category, so check that breeding codes are right")
+
 # in blocks that have at least one confident confirmation for a species, retain
 # C3 codes from breeding season, C4 codes from pre/postbreeding season. 
 bba3 <- bba3 %>%
@@ -559,6 +584,12 @@ bba3 <- bba3 %>%
     TRUE ~ eval_tier
   ))
 
+# update breeding category to match new codes
+bba3$breeding_category <- update_brdcat(bba3)
+
+if (any(is.na(bba3$breeding_category)))
+  warning("NAs in breeding category, so check that breeding codes are right")
+
 # Review tagged records -------------------------------------------------------
 # get records for manual review that are cat2 and tier2, that haven't been 
 # changed, and that have additional info (ie comments or media).
@@ -662,6 +693,12 @@ bba3 <- bba3 %>%
   new_code = ifelse(str_detect(new_code, "_"), 
                     str_extract(new_code, ".+(?=_)"),
                     new_code))
+
+# update behavior category based on new codes
+bba3$breeding_category <- update_brdcat(bba3)
+
+if (any(is.na(bba3$breeding_category)))
+  warning("NAs in breeding category, so check that breeding codes are right")
 
 # update behavior code column with codes that accurately reflect behavior
 # even if they don't accurately reflect local breeding.
