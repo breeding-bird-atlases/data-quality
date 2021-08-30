@@ -533,11 +533,7 @@ bba3 <- bba3 %>%
 bba3$new_code <- as.character(bba3$new_code)
 
 bba3 <- bba3 %>%
-  mutate(behavior_code = case_when(
-    eval_tier == "unlikely" ~ breeding_code,
-    TRUE ~ behavior_code
-  ),
-  new_code = case_when(
+  mutate(new_code = case_when(
     eval_tier == "unlikely" ~ "NC",
     TRUE ~ new_code
   ),
@@ -665,7 +661,21 @@ bba3 <- bba3 %>%
   
   new_code = ifelse(str_detect(new_code, "_"), 
                     str_extract(new_code, ".+(?=_)"),
-                    new_code),
+                    new_code))
+
+# update behavior code column with codes that accurately reflect behavior
+# even if they don't accurately reflect local breeding.
+bba3 <- bba3 %>%
+  mutate(behavior_code = case_when(
+    new_code_reason %in% c("bcawaysite",
+                           "cfnotapp",
+                           "nbnotapp",
+                           "notlikely",
+                           "notlocal",
+                           "tooearly",
+                           "toolate") ~ breeding_code,
+    TRUE ~ new_code
+  ),
   
   last_reviewed_date = Sys.time()) %>%
   select(-c(season_len,
