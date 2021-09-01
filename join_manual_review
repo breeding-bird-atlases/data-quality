@@ -14,6 +14,9 @@ month <- "jul"
 year <- 2021
 id <- "global_unique_identifier"
 
+reasons <- read.csv(here("data", "ebird", "4_review", 
+                         "review_reasons_sep2021.csv"))
+
 bba3 <- read.csv(here("data", "ebird", "5_validated",
                            paste0("mddcbba3_autovalidated_", 
                                   month, year, ".csv")))
@@ -21,6 +24,19 @@ bba3 <- read.csv(here("data", "ebird", "5_validated",
 bba3_man <- read.csv(here("data", "ebird", "4_review", 
                           paste0("mddcbba3_manualreview_", 
                                  month, year, ".csv")))
+
+# remove any white space from breeding codes/reason
+bba3_man[, c("new_code", "new_code_reason")] <- lapply(
+  bba3_man[, c("new_code", "new_code_reason")], str_trim
+  )
+
+# check spelling of breeding codes/reasons
+if(length(bba3_man[which(!bba3_man$new_code %in% unique(bba3$new_code)), 
+                   "new_code"]) > 0 |
+   length(bba3_man[which(!bba3_man$new_code_reason %in% 
+                         unique(reasons$database_code)),
+                   "new_code_reason"]))
+  stop("Spelling errors occurred; locate and fix.")
 
 bba3_man <- bba3_man %>%
   mutate(behavior_code = case_when(
