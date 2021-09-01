@@ -49,6 +49,18 @@ breeding_sp <- unique(dates$common_name)
 cwb <- unlist(read.csv(here("data", "bba3",
                             "colonial_waterbirds_jul2021.csv")))
 
+# MD-DC species that get manually reviewed regardless.
+review_sp <- unlist(read.csv(here("data", "bba3", 
+                                  "review_species_jul2021.csv")))
+
+# hard-code breeding categories so that the category column doesn't need to 
+# be constantly updated.
+observed <- "NC"
+possible <- c("H", "S")
+probable <- c("S7", "M", "P", "T", "C", "N", "A", "B", "PE")
+confirmed <- c("CN", "NB", "DD", "UN", "ON", "FL", 
+               "CF", "FY", "FS", "NE", "NY")
+
 # add the species with codes that are not in codes/dates/locations
 # to codes/dates/locations.
 # fill column values with NA
@@ -127,6 +139,10 @@ if (any(unique(bba3[which(is.na(bba3$dv_code)), "common_name"])
         %in% breeding_sp))
   warning("Some breeding species have not been evaluated")
 
+# check if any non-breeding species records might be legitimate
+# if so (yay!) then add them to the review_sp document
+unique(bba3[which(is.na(bba3$dv_code)), c("common_name", "breeding_code")])
+
 table(bba3$dv_code)
 
 # Address records based on category
@@ -164,27 +180,9 @@ if (any(c(sum(bba3$new_code != bba3$breeding_code) !=
     any(!unique(bba3$breeding_code) %in% colnames(select(codes, H:NY)))))
   warning("Data validation did not go as expected")
 
+# update the code change to reflect their new category
 bba3 <- bba3 %>%
   mutate(dv_code = ifelse(dv_code == "improbable", "expected", dv_code))
-
-# update the breeding category to match the breeding code
-update_brdcat <- function(x) {
-  case_when(x$new_code %in% "NC" ~ "C1",
-            x$new_code %in% c("H", "S") ~ "C2",
-            
-            x$new_code %in% c("S7", "M", "P", "T", "C", "N", "A", "B", 
-                              "PE") ~ "C3",
-            
-            x$new_code %in% c("CN", "NB", "DD", "UN", "ON", "FL", 
-                              "CF", "FY", "FS", "NE", "NY") ~ "C4",
-            
-            TRUE ~ NA_character_)
-}
-
-bba3$breeding_category <- update_brdcat(bba3)
-
-if (any(is.na(bba3$breeding_category)))
-  warning("NAs in breeding category, so check that breeding codes are right")
 
 # b) Spatiotemporal review ----------------------------------------------------
 # use new_code column for subsequent checks
@@ -192,24 +190,40 @@ if (any(is.na(bba3$breeding_category)))
 
 # separate loc dataset into colony and non-colony locations so each can be
 # evaluated separately.
-loc_county <- unique(loc[, c("common_name", "county", "expected")])
+loc_county <- unique(loc[, c("common_name", "county", "is_expected")])
 
-loc_colony <- unique(loc[, c("common_name", "block_name", "colony")])
+loc_colony <- unique(loc[, c("common_name", "block_name", "is_colony")])
 
 bba3 <- bba3 %>% 
   left_join(., loc_county, by = c("common_name", "county")) %>%
-  left_join(., loc_colony, by = c("common_name", "block_name")) %>% 
-  rename(dv_loc_county = expected,
-         dv_loc_colony = colony)
+  left_join(., loc_colony, by = c("common_name", "block_name")) 
 
 bba3[which(bba3[, "common_name"] %in% cwb & 
-             is.na(bba3[, "dv_loc_colony"])), "dv_loc_colony"] <- "no_colony"
+             is.na(bba3[, "is_colony"])), "is_colony"] <- FALSE
 
-bba3[which(is.na(bba3$dv_loc_county)), "dv_loc_county"] <- "unexpected"
+bba3[which(is.na(bba3$is_expected)), "is_expected"] <- FALSE
 
 seq_na <- function(x, y) {
   if(is.na(x) | is.na(y)) NA else seq(x, y)
 }
+
+# add a column that indicates that an observation has at least one comment or
+# media.
+bba3 <- bba3 %>%
+  mutate(has_support = case_when(
+    (has_media == TRUE | 
+       !is.na(trip_comments) | 
+       !is.na(species_comments)) ~ TRUE,
+    
+    (has_media == FALSE & 
+       is.na(trip_comments) &
+       is.na(species_comments)) ~ FALSE,
+    
+    TRUE ~ NA
+  ))
+
+if (any(is.na(bba3$has_support)))
+  warning("Support check did not go as expected.")
 
 # convert breeding/safe dates to julian date
 # set date periods so that there are no gaps or overlaps between periods
@@ -370,53 +384,44 @@ if (any(unique(bba3[which(is.na(bba3$observation_season)), "common_name"])
 bba3 <- bba3 %>% 
   mutate(eval_tier = case_when(
     observation_season %in% c("earlyseason", "lateseason") &
-      (dv_loc_county == "expected" |
-         dv_loc_colony == "colony") &
-      breeding_category == "C4" ~ "confident",
+      (is_expected == TRUE | is_colony == TRUE) &
+      breeding_code %in% confirmed ~ "confident",
     
     observation_season == "earlyseason" &
-      dv_loc_county == "expected" &
+      is_expected == TRUE &
       common_name %in% c("Turkey Vulture", "Black Vulture") &
       breeding_code == "P" ~ "confident",
     
     observation_season %in% c("earlyseason", "lateseason") &
-      (dv_loc_county == "unexpected" |
-         dv_loc_colony == "no_colony") &
-      breeding_category == "C4" ~ "uncertain",
+      (is_expected == FALSE | is_colony == FALSE) &
+      breeding_code %in% confirmed ~ "uncertain",
     
     observation_season %in% c("earlyseason", "lateseason") &
-      breeding_category %in% c("C2", "C3") ~ "unlikely",
+      breeding_code %in% c(possible, probable) ~ "unlikely",
     
     observation_season %in% c("prebreeding", "postbreeding") &
-      (dv_loc_county == "expected" |
-         dv_loc_colony == "colony") &
-      breeding_category %in% c("C3", "C4") ~ "confident",
+      (is_expected == TRUE | is_colony == TRUE) &
+      breeding_code %in% c(probable, confirmed) ~ "confident",
     
     observation_season %in% c("prebreeding", "postbreeding") &
-      (dv_loc_county == "unexpected" |
-         dv_loc_colony == "no_colony") &
-      breeding_category %in% c("C3", "C4") ~ "uncertain",
+      (is_expected == FALSE | is_colony == FALSE) &
+      breeding_code %in% c(probable, confirmed) ~ "uncertain",
     
     observation_season %in% c("prebreeding", "postbreeding") &
-      breeding_category == "C2" ~ "unlikely",
+      breeding_code %in% possible ~ "unlikely",
     
     observation_season == "breeding" &
-      (dv_loc_county == "expected" |
-         dv_loc_colony == "colony") ~ "confident",
+      (is_expected == TRUE | is_colony == TRUE) ~ "confident",
     
     observation_season == "breeding" &
-      (dv_loc_county == "unexpected" |
-         dv_loc_colony == "no_colony") &
-      (breeding_category %in% c("C2", "C4") |
-      breeding_code == "S7") &
-      breeding_code != "FL" ~ "confident",
+      (is_expected == FALSE | is_colony == FALSE) &
+      (breeding_code %in% c(possible, confirmed, "S7") & 
+         breeding_code != "FL") ~ "confident",
     
     observation_season == "breeding" &
-      (dv_loc_county == "unexpected" |
-         dv_loc_colony == "no_colony") &
-      (breeding_category == "C3" |
-         breeding_code == "FL") &
-      breeding_code != "S7" ~ "uncertain",
+      (is_expected == FALSE | is_colony == FALSE) &
+      (breeding_code %in% c(probable, "FL") &
+      breeding_code != "S7") ~ "uncertain",
     
     TRUE ~ NA_character_
   )) 
@@ -454,22 +459,16 @@ bba3 <- bba3 %>%
 table(bba3$highest_block_breeding_code)
 sum(is.na(bba3$highest_block_breeding_code))
 
-# update breeding category based on code changes
-bba3$breeding_category <- update_brdcat(bba3)
-
-if (any(is.na(bba3$breeding_category)))
-  warning("NAs in breeding category, so check that breeding codes are right")
-
 # in blocks that have at least one confident confirmation for a species, retain
 # C3 codes from breeding season, C4 codes from pre/postbreeding season. 
 bba3 <- bba3 %>%
   mutate(eval_tier = case_when(
-    breeding_category == "C3" &
+    breeding_code %in% probable &
       observation_season == "breeding" &
       eval_tier == "uncertain" &
       highest_block_breeding_code > "PE" ~ "confident",
     
-    breeding_category == "C4" &
+    breeding_code %in% confirmed &
       observation_season %in% c("prebreeding", "postbreeding") &
       eval_tier == "uncertain" & 
       highest_block_breeding_code > "PE" ~ "confident",
@@ -483,17 +482,17 @@ bba3 <- bba3 %>%
 bba3 <- bba3 %>%
   group_by(block_name) %>%
   mutate(new_colony = case_when(
-    dv_loc_colony == "no_colony" &
+    is_colony == FALSE &
       common_name %in% cwb &
-      breeding_category == "C4" &
+      breeding_code %in% confirmed &
       eval_tier == "confident" ~ as_date(observation_date),
     
     TRUE ~ NA_Date_
   ),
-  dv_loc_colony = case_when(
-    !is.na(new_colony) ~ "colony",
+  is_colony = case_when(
+    !is.na(new_colony) ~ TRUE,
     
-    TRUE ~ dv_loc_colony
+    TRUE ~ is_colony
   )) %>%
   group_by(common_name, block_name) %>%
   mutate(new_colony = case_when(
@@ -535,17 +534,17 @@ write.csv(colony, here("data", "ebird", "3_filtered",
 # update eval_tier records based on new known colonies
 bba3 <- bba3 %>% 
   mutate(eval_tier = case_when(
-    dv_loc_colony == "colony" &
+    is_colony == TRUE &
       observation_season %in% c("earlyseason", "lateseason") &
-      breeding_category == "C4" ~ "confident",
+      breeding_code %in% confirmed ~ "confident",
     
-    dv_loc_colony == "colony" &
+    is_colony == TRUE &
       observation_season == "breeding" &
       eval_tier != "confident" ~ "confident",
     
-    dv_loc_colony == "colony" &
+    is_colony == TRUE &
       observation_season %in% c("prebreeding", "postbreeding") &
-      breeding_category %in% c("C3", "C4") &
+      breeding_code %in% c(probable, confirmed) &
       eval_tier != "confident" ~ "confident",
     
     TRUE ~ eval_tier
@@ -564,16 +563,15 @@ bba3 <- bba3 %>%
   ),
   new_code_reason = case_when(
     eval_tier == "unlikely" &
-      (dv_loc_county == "expected" | dv_loc_colony == "colony") &
+      (is_expected == TRUE | is_colony == TRUE) &
       observation_season %in% c("earlyseason", "prebreeding") ~ "tooearly",
     
     eval_tier == "unlikely" &
-      (dv_loc_county == "expected" | dv_loc_colony == "colony") &
+      (is_expected == TRUE | is_colony == TRUE) &
       observation_season %in% c("postbreeding", "lateseason") ~ "toolate",
     
     eval_tier == "unlikely" &
-      (dv_loc_county == "unexpected" | 
-         dv_loc_colony == "no_colony") ~ "notlikely",
+      (is_expected == FALSE | is_colony == FALSE) ~ "notlikely",
     
     TRUE ~ new_code_reason
   ),
@@ -584,7 +582,20 @@ bba3 <- bba3 %>%
     TRUE ~ eval_tier
   ))
 
-# update breeding category to match new codes
+# update the breeding category to match the breeding code
+update_brdcat <- function(x) {
+  case_when(x$new_code %in% "NC" ~ "C1",
+            x$new_code %in% c("H", "S") ~ "C2",
+            
+            x$new_code %in% c("S7", "M", "P", "T", "C", "N", "A", "B", 
+                              "PE") ~ "C3",
+            
+            x$new_code %in% c("CN", "NB", "DD", "UN", "ON", "FL", 
+                              "CF", "FY", "FS", "NE", "NY") ~ "C4",
+            
+            TRUE ~ NA_character_)
+}
+
 bba3$breeding_category <- update_brdcat(bba3)
 
 if (any(is.na(bba3$breeding_category)))
@@ -593,12 +604,14 @@ if (any(is.na(bba3$breeding_category)))
 # Review tagged records -------------------------------------------------------
 # get records for manual review that are cat2 and tier2, that haven't been 
 # changed, and that have additional info (ie comments or media).
+manual_review_sp <- bba3 %>%
+  filter(common_name %in% review_sp)
+
 manual_review <- bba3 %>%
   filter((dv_code == "plausible" | eval_tier == "uncertain") &
            is.na(new_code_reason) &
-           (!is.na(trip_comments) | 
-              !is.na(species_comments) |
-              has_media == TRUE)) %>%
+           has_support == TRUE) %>%
+  bind_rows(., manual_review_sp) %>%
   select(global_unique_identifier,
          protocol_type,
          atlaser_name,
@@ -614,8 +627,8 @@ manual_review <- bba3 %>%
          new_code_reason,
          eval_tier,
          dv_code,
-         dv_loc_county,
-         dv_loc_colony,
+         is_expected,
+         is_colony,
          new_colony,
          county,
          block_name,
@@ -643,9 +656,7 @@ bba3 <- bba3 %>%
   mutate(new_code = case_when(
     dv_code == "plausible" &
       is.na(new_code_reason) &
-      (is.na(trip_comments) &
-         is.na(species_comments) &
-         has_media == FALSE) ~ vapply(seq_len(nrow(bba3)), function(i) {
+      has_support == FALSE ~ vapply(seq_len(nrow(bba3)), function(i) {
            cat2_changes[which(cat2_changes[, "common_name"] == 
                                 as.character(bba3[i, "common_name"])),
                         as.character(bba3[i, "breeding_code"])]
@@ -653,19 +664,25 @@ bba3 <- bba3 %>%
     
     eval_tier == "uncertain" &
       is.na(new_code_reason) &
-      (is.na(trip_comments) &
-         is.na(species_comments) &
-         has_media == FALSE) ~ "NC",
+      has_support == FALSE ~ "NC",
     
     TRUE ~ new_code
   ), 
   
+  new_code_reason = case_when(
+    is.na(new_code_reason) &
+      str_detect(new_code, "_") ~ str_extract(new_code, 
+                                              "(?<=_).+[^no_change]"),
+    
+    is.na(new_code_reason) & new_code == "NC" ~ "CHECKMEOUT", # notlikely or bcinadqt?
+    
+    TRUE ~ new_code_reason
+  ),
+  
   dv_code = case_when(
     dv_code == "plausible" &
       is.na(new_code_reason) &
-      (is.na(trip_comments) &
-         is.na(species_comments) &
-         has_media == FALSE) ~ "expected",
+      has_support == FALSE ~ "expected",
     
     TRUE ~ dv_code
   ),
@@ -673,28 +690,15 @@ bba3 <- bba3 %>%
   eval_tier = case_when(
     eval_tier == "uncertain" &
       is.na(new_code_reason) &
-      (is.na(trip_comments) &
-         is.na(species_comments) &
-         has_media == FALSE) ~ "confident",
+      has_support == FALSE ~ "confident",
     
     TRUE ~ eval_tier
-  ),
-  
-  new_code_reason = case_when(
-    is.na(new_code_reason) &
-      str_detect(new_code, "_") ~ str_extract(new_code, 
-                                              "(?<=_).+[^no_change]"),
-    
-    is.na(new_code_reason) & new_code == "NC" ~ "bcinadqt",
-    
-    TRUE ~ new_code_reason
   ),
   
   new_code = ifelse(str_detect(new_code, "_"), 
                     str_extract(new_code, ".+(?=_)"),
                     new_code))
 
-# update behavior category based on new codes
 bba3$breeding_category <- update_brdcat(bba3)
 
 if (any(is.na(bba3$breeding_category)))
