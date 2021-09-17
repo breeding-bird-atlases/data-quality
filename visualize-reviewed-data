@@ -1,0 +1,205 @@
+# create block-level species distribution maps using validated data to 
+# visually ascertain whether the validation worked acceptably.
+
+library(here)
+library(tidyverse)
+library(sf)
+library(RColorBrewer)
+library(pdftools)
+library(grid)
+
+month <- "aug"
+year <- 2021
+
+observed <- "NC"
+possible <- c("H", "S")
+probable <- c("S7", "M", "P", "T", "C", "N", "A", "B", "PE")
+confirmed <- c("CN", "NB", "DD", "UN", "ON", "FL", 
+               "CF", "FY", "FS", "NE", "NY")
+
+bba3_all <- read.csv(here("data", "ebird", "5_validated",
+                      paste0("mddcbba3_validated_", month, year, ".csv")))
+
+blocks <- read.csv(here("data", "bba3", "block_metadata.csv")) %>%
+  select(block_name, dnr_block_name)
+
+codes <- read.csv(here("data", "bba3", 
+                       "expected_breeding_codes_sep2021.csv"))
+
+blockgrid <- st_read(dsn = here("data", "mapping", "blockgrid", "blockgrid"), 
+                     layer = "MDDCBBA3_block_grid_trimmed")
+
+countymap <- st_read(dsn = here("data", "mapping", "md_county_maps"),
+                     layer = "md_county_maps")
+
+birds <- bba3_all %>%
+  filter(!is.na(breeding_code) & breeding_category != "C1") %>%
+  arrange(taxonomic_order) %>%
+  summarize(birds = unique(common_name)) %>%
+  unlist()
+
+# get the proportions of changes and the reasons for the changes for each 
+# species.
+reasons <- bba3_all %>%
+  filter(!is.na(new_code_reason)) %>%
+  group_by(common_name, new_code_reason) %>%
+  mutate(num_new_code_reason = length(new_code_reason)) %>%
+  group_by(common_name) %>%
+  mutate(change_reason_prop = (num_new_code_reason/
+                                 length(new_code_reason))*100) %>%
+  ungroup() %>%
+  select(common_name, new_code_reason, change_reason_prop) %>%
+  distinct() %>%
+  full_join(., data.frame(common_name = birds, row.names = NULL), 
+            by = "common_name")
+
+changes <- bba3_all %>%
+  filter(!is.na(breeding_code) & !is.na(new_code)) %>%
+  mutate(is_code_changed = ifelse(breeding_code != new_code, TRUE, FALSE)) %>%
+  group_by(common_name, breeding_code) %>%
+  mutate(num_observations = length(breeding_code),
+         num_obs_changed = sum(is_code_changed),
+         prop_codes_changed = (sum(is_code_changed)/num_observations)*100,
+         prop_codes_unchanged = abs(prop_codes_changed - 100)) %>%
+  ungroup() %>%
+  select(common_name, breeding_code, num_observations, num_obs_changed, 
+         prop_codes_changed, prop_codes_unchanged) %>%
+  distinct() %>%
+  full_join(., data.frame(common_name = birds, row.names = NULL), 
+            by = "common_name")
+
+changes$breeding_code <- factor(changes$breeding_code, 
+                                ordered = TRUE,
+                                levels = c("NC", 
+                                           colnames(select(codes, H:NY))))
+  
+# don't need non-coded observations; selecting breeding category only selects
+# validated breeding codes.
+bba3 <- bba3_all %>% 
+  filter(breeding_category %in% c("C2", "C3", "C4")) %>%
+  mutate(highest_block_category = case_when(
+    highest_block_breeding_code %in% possible ~ "Possible",
+    highest_block_breeding_code %in% probable ~ "Probable", 
+    highest_block_breeding_code %in% confirmed ~ "Confirmed",
+    TRUE ~ NA_character_
+  )) %>%
+  # add the dnr_block_name so the df can be joined with the sf file
+  left_join(., blocks, by = "block_name") %>%
+  select(global_unique_identifier,
+         taxonomic_order, 
+         common_name, 
+         dnr_block_name, 
+         highest_block_category) %>%
+  full_join(., data.frame(common_name = birds, row.names = NULL), 
+            by = "common_name")
+
+bba3$highest_block_category <- factor(bba3$highest_block_category, 
+                                      ordered = TRUE,
+                                      levels = c("Possible", 
+                                                 "Probable", 
+                                                 "Confirmed"))
+
+# the highest block code represents each year, so need to pick the max
+bba3 <- bba3 %>%
+  group_by(common_name, dnr_block_name) %>%
+  mutate(highest_block_category = 
+           suppressWarnings(max(highest_block_category, na.rm = TRUE)),
+         highest_block_category = case_when(
+           is.na(highest_block_category) ~ 
+             suppressWarnings(max(highest_block_category, na.rm = TRUE)),
+           TRUE ~ highest_block_category
+         )) %>%
+  ungroup()
+
+# get rejected breeding codes
+bba3_unval <- bba3_all %>%
+  left_join(., blocks, by = "block_name") %>%
+  filter(new_code == "NC") %>%
+  group_by(common_name, dnr_block_name) %>%
+  transmute(unval = length(breeding_code)) %>%
+  ungroup() %>%
+  full_join(., data.frame(common_name = birds, row.names = NULL), 
+            by = "common_name")
+
+blanktheme <- theme(panel.grid.major = element_blank(), 
+                    panel.grid.minor = element_blank(),
+                    panel.background = element_rect(fill = "transparent",
+                                                    colour = NA), 
+                    plot.background = element_rect(fill = "transparent",
+                                                   colour = NA),
+                    axis.line = element_blank(), 
+                    axis.text.x = element_blank(),
+                    axis.text.y = element_blank(), 
+                    axis.ticks = element_blank(), 
+                    axis.title.x = element_blank(), 
+                    axis.title.y = element_blank(),
+                    legend.background = element_rect(fill = "transparent",
+                                                     colour = NA))
+
+pdf(file = here("output", "validation",
+                paste0("species_maps_validation_check_", 
+                       month, year, ".pdf")),
+    width = 14.1, height = 7.3, onefile = TRUE)
+
+for(bird in birds){
+  species_bba3 <- bba3 %>% 
+    filter(common_name %in% bird) %>%
+    distinct()
+  
+  species_bba3_unval <- bba3_unval %>%
+    filter(common_name %in% bird) %>%
+    distinct()
+    
+  blockgrid_bba3 <- blockgrid %>% 
+    left_join(., species_bba3, by = c("Block_Name" = "dnr_block_name")) %>%
+    left_join(., species_bba3_unval[, c("dnr_block_name", "unval")], 
+              by = c("Block_Name" = "dnr_block_name"))
+  
+  p <- ggplot(blockgrid_bba3) +
+    geom_sf(aes(fill = highest_block_category)) +
+    geom_point(data = blockgrid_bba3[which(!is.na(blockgrid_bba3$unval)), ], 
+               aes(x = CENTROID_X, y = CENTROID_Y, color = unval)) +
+    scale_fill_brewer(palette = "Greens", na.value = "gray50", drop = FALSE,
+                      name = "Accepted \nObservations") +
+    scale_color_continuous(name = "Unaccepted \nObservations") +
+    geom_sf(data = countymap, color = "black", fill = NA) +
+    blanktheme +
+    theme(legend.position = c(.9, .65)) +
+    annotate("text", x = -79.45, y = 39.8, label = bird, size = 8, hjust = 0) 
+  
+  p1 <- ggplot(changes[which(changes$common_name == bird), ]) +
+    geom_bar(aes(x = breeding_code, y = prop_codes_changed), stat = "identity",
+             color = "blue4", fill = "blue4") +
+    labs(x = NULL, y = "Percent of \nBreeding Codes Changed") +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_rect(fill = "transparent", color = NA),
+          plot.background = element_rect(fill = "transparent", color = NA),
+          plot.title = element_text(size = 10)) +
+    ggtitle(paste(sum(changes$num_observations[changes$common_name == bird]),
+                  "breeding codes reported,", 
+                  sum(changes$num_obs_changed[changes$common_name == bird]),
+                  "changed"))
+  
+  p2 <- ggplot(reasons[which(reasons$common_name == bird), ]) +
+    geom_bar(aes(x = "", y = change_reason_prop, fill = new_code_reason), 
+             stat = "identity", width = 1) +
+    coord_polar("y", start = 0) +
+    blanktheme +
+    scale_fill_brewer(palette = "Paired", name = "Reason for Code Change",
+                      guide = guide_legend(title.position = "top",
+                                           ncol = 2,
+                                           byrow = FALSE)) +
+    theme(legend.direction = "vertical",
+          legend.position = "left",
+          legend.box.background = element_rect(fill = "transparent", 
+                                               color = NA))
+  
+  print(p)
+  vp1 <- viewport(width = 0.45,  height = 0.39, x = 0.27, y = 0.22)
+  print(p1, vp = vp1)
+  vp2 <- viewport(width = 0.4, height = 0.39, x = 0.25, y = 0.56)
+  print(p2, vp = vp2)
+}
+
+dev.off()
