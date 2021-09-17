@@ -9,10 +9,12 @@
 
 library(here)
 library(tidyverse)
+library(lubridate)
 
-month <- "jul"
+month <- "aug"
 year <- 2021
 id <- "global_unique_identifier"
+gabriel_foley <- "obsr275047"
 
 reasons <- read.csv(here("data", "ebird", "4_review", 
                          "review_reasons_sep2021.csv"))
@@ -25,6 +27,9 @@ bba3_man <- read.csv(here("data", "ebird", "4_review",
                           paste0("mddcbba3_manualreview_", 
                                  month, year, ".csv")))
 
+codes <- read.csv(here("data", "bba3", 
+                       "expected_breeding_codes_sep2021.csv"))
+
 # remove any white space from breeding codes/reason
 bba3_man[, c("new_code", "new_code_reason")] <- lapply(
   bba3_man[, c("new_code", "new_code_reason")], str_trim
@@ -33,11 +38,14 @@ bba3_man[, c("new_code", "new_code_reason")] <- lapply(
 # check spelling of breeding codes/reasons
 if(length(bba3_man[which(!bba3_man$new_code %in% unique(bba3$new_code)), 
                    "new_code"]) > 0 |
-   length(bba3_man[which(!bba3_man$new_code_reason %in% 
-                         unique(reasons$database_code)),
-                   "new_code_reason"]))
+   length(bba3_man[which(
+     !bba3_man$new_code_reason[!is.na(bba3_man$new_code_reason)] %in% 
+                         unique(reasons$database_code)
+     ),
+                   "new_code_reason"]) > 0){
   stop("Spelling errors occurred; locate and fix.")
-
+}
+  
 bba3_man <- bba3_man %>%
   mutate(behavior_code = case_when(
     new_code_reason %in% c("bcawaysite",
@@ -50,15 +58,21 @@ bba3_man <- bba3_man %>%
     TRUE ~ new_code
   ))
 
+# order by global_unique_identifier so that the correct codes are replaced
+bba3 <- bba3[order(bba3[, id]), ]
+bba3_man <- bba3_man[order(bba3_man[, id]), ]
+
+manual_reviewed_indx <- which(bba3[, id] %in% bba3_man[, id])
+
 for(x in c("new_code", "new_code_reason", "behavior_code")) {
   bba3[, x] <- replace(bba3[, x],
-                       which(bba3[, id] %in% bba3_man[, id]),
+                       manual_reviewed_indx,
                        bba3_man[, x])
 }
 
 # update the breeding category to match the breeding code
 update_brdcat <- function(x) {
-  case_when(x$new_code %in% "NC" ~ "C1",
+  case_when(x$new_code %in% c("NC", "F") ~ "C1",
             x$new_code %in% c("H", "S") ~ "C2",
             
             x$new_code %in% c("S7", "M", "P", "T", "C", "N", "A", "B", 
@@ -72,10 +86,45 @@ update_brdcat <- function(x) {
 
 bba3$breeding_category <- update_brdcat(bba3)
 
-if (any(is.na(bba3$breeding_category)))
+if (any(is.na(bba3$breeding_category[!is.na(bba3$new_code)]))){
   warning("NAs in breeding category, so check that breeding codes are right")
+}
 
-bba3[which(bba3[, id] %in% bba3_man[, id]), "last_reviewed_date"] <- Sys.time()
+# add block highest code using the updated, reviewed codes
+bba3$new_code <- factor(bba3$new_code, 
+                        ordered = TRUE,
+                        levels = c("NC", colnames(select(codes, H:NY))))
+
+bba3 <- bba3 %>%
+  group_by(year(as_date(observation_date)), common_name, block_name) %>%
+  mutate(highest_block_breeding_code = 
+           # this will kick up warnings for missing values
+           suppressWarnings(max(new_code, na.rm = TRUE)),
+         n_highest_block_breeding_code = 
+           length(which(new_code %in% max(new_code)))) %>%
+  mutate(highest_block_breeding_code = case_when(
+    is.na(highest_block_breeding_code) ~ max(highest_block_breeding_code, 
+                                             na.rm = TRUE),
+    
+    TRUE ~ highest_block_breeding_code
+  )) %>%
+  ungroup() %>%
+  select(-`year(as_date(observation_date))`)
+
+table(bba3$highest_block_breeding_code)
+sum(is.na(bba3$highest_block_breeding_code))
+
+# add the review metadata
+bba3[manual_reviewed_indx, "last_reviewed_date"] <- Sys.time()
+
+bba3[manual_reviewed_indx, "code_manually_reviewed"] <- TRUE
+
+bba3 <- bba3 %>%
+  mutate(breeding_code_reviewer = case_when(
+    global_unique_identifier %in% bba3_man$global_unique_identifier ~ 
+      gabriel_foley,
+    TRUE ~ NA_character_
+  ))
 
 write.csv(bba3, here("data", "ebird", "5_validated",
                      paste0("mddcbba3_validated_", month, year, ".csv")),
